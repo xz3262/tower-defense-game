@@ -16,6 +16,14 @@ import { enemyConfig } from '../game/config/EnemyConfig'
 import { STARTING_GOLD, STARTING_LIVES, SELL_REFUND_RATIO, MAX_SPEED, TILE_SIZE } from '../game/config/GameConstants'
 import { distance, gridToPixel } from '../utils/math'
 
+export interface GameSettings {
+  soundEnabled: boolean
+  showRangeCircles: boolean
+  showHealthBars: boolean
+  showDamageNumbers: boolean
+  defaultSpeed: number
+}
+
 const generateId = (): string => {
   return Math.random().toString(36).substring(2, 11)
 }
@@ -33,15 +41,30 @@ const getInitialState = () => ({
   selectedPlacedTower: null as TowerInstance | null,
   towers: [] as TowerInstance[],
   enemies: [] as EnemyInstance[],
-  projectiles: [] as ProjectileInstance[]
+  projectiles: [] as ProjectileInstance[],
+  gameSettings: {
+    soundEnabled: true,
+    showRangeCircles: true,
+    showHealthBars: true,
+    showDamageNumbers: true,
+    defaultSpeed: 1
+  } as GameSettings
 })
 
 export const useGameStore = create<GameStore>((set, get) => ({
   ...getInitialState(),
 
+  updateGameSettings: (newSettings: Partial<GameSettings>): void => {
+    set(state => ({
+      gameSettings: { ...state.gameSettings, ...newSettings }
+    }))
+  },
+
   startGame: (mapId: string): void => {
     const map = getMap(mapId)
     if (!map) return
+
+    const settings = get().gameSettings
 
     set({
       gameState: 'playing',
@@ -51,7 +74,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       currentWave: 0,
       totalWaves: map.waves.length,
       score: 0,
-      speed: 1,
+      speed: settings.defaultSpeed,
       selectedTower: null,
       selectedPlacedTower: null,
       towers: [],
@@ -68,7 +91,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     if (state.gold < towerStats.cost) return
 
     const tile = state.currentMap.tiles[gridY]?.[gridX]
-    if (!tile || tile.type !== 'grass') return
+    if (!tile || tile !== 'grass') return
 
     const existingTower = state.towers.find(
       t => t.gridX === gridX && t.gridY === gridY
@@ -192,9 +215,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       const dist = Math.sqrt(dx * dx + dy * dy)
 
       if (dist < 5) {
-        // Reached waypoint, move to next
         if (enemy.pathIndex >= path.length - 1) {
-          // Reached exit
           get().removeLife()
           return { ...enemy, isAlive: false }
         }
@@ -206,7 +227,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
         }
       }
 
-      // Move toward waypoint
       const moveSpeed = enemy.speed * TILE_SIZE * (scaledDelta / 1000)
       const moveX = enemy.x + (dx / dist) * moveSpeed
       const moveY = enemy.y + (dy / dist) * moveSpeed
@@ -224,13 +244,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
       const dist = Math.sqrt(dx * dx + dy * dy)
 
       if (dist < 10) {
-        // Hit target - apply damage
         const damage = proj.damage
         const updatedEnemiesWithDamage = updatedEnemies.map(e => {
           if (e.id !== target.id) return e
           const newHp = e.hp - damage
           if (newHp <= 0) {
-            // Enemy killed
             const enemyStats = enemyConfig[e.type]
             get().addGold(enemyStats.reward)
             get().set(s => ({ score: s.score + enemyStats.reward }))
@@ -239,7 +257,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
           return { ...e, hp: newHp }
         }).filter(e => e.isAlive)
 
-        // Apply status effect if any
         if (proj.effect) {
           const updatedWithEffect = updatedEnemiesWithDamage.map(e => {
             if (e.id !== target.id) return e
@@ -251,7 +268,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
         return null
       }
 
-      // Move projectile
       const moveSpeed = proj.speed * (scaledDelta / 1000)
       const moveX = proj.x + (dx / dist) * moveSpeed
       const moveY = proj.y + (dy / dist) * moveSpeed
@@ -267,7 +283,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
       const damage = getTowerDamage(tower.type, tower.level)
       const rangePixels = range * TILE_SIZE
 
-      // Find target
       let target: EnemyInstance | null = null
       let minDist = Infinity
 
@@ -276,7 +291,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
         const dist = distance(towerPos, { x: enemy.x, y: enemy.y })
 
         if (dist <= rangePixels) {
-          // Check if can target flying
           const enemyStats = enemyConfig[enemy.type]
           if (!towerStats.canTargetFlying && enemyStats.isFlying) continue
 
@@ -291,12 +305,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
         return { ...tower, currentTarget: null }
       }
 
-      // Check if can fire
       const fireInterval = 1000 / towerStats.fireRate
       const timeSinceLastFire = currentTime - tower.lastFireTime
 
       if (timeSinceLastFire >= fireInterval) {
-        // Fire projectile
         const towerPos = gridToPixel(tower.gridX, tower.gridY)
         const projectile: ProjectileInstance = {
           id: generateId(),
@@ -322,7 +334,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
       return { ...tower, currentTarget: target.id }
     })
 
-    // Check victory condition
     let newGameState = state.gameState
     if (
       state.currentWave >= state.totalWaves &&
