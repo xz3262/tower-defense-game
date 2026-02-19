@@ -32,7 +32,6 @@ export const renderIceTower = (
   const centerY = y * TILE_SIZE + TILE_SIZE / 2
   const radius = BASE_RADIUS * (1 + (level - 1) * 0.15)
 
-  // Draw slow aura ring (always visible for ice tower)
   const auraRadius = (iceTowerStats.range + (level - 1) * iceTowerStats.rangePerLevel) * TILE_SIZE
   drawRing(ctx, centerX, centerY, auraRadius - 2, auraRadius, 'rgba(103, 232, 249, 0.15)')
   ctx.beginPath()
@@ -43,7 +42,6 @@ export const renderIceTower = (
   ctx.stroke()
   ctx.setLineDash([])
 
-  // Draw range indicator on hover
   if (showRange) {
     drawRing(ctx, centerX, centerY, auraRadius - 2, auraRadius, 'rgba(167, 139, 250, 0.15)')
     ctx.beginPath()
@@ -53,12 +51,8 @@ export const renderIceTower = (
     ctx.stroke()
   }
 
-  // Glow effect for higher levels
   if (level >= 2) {
-    const glowGradient = ctx.createRadialGradient(
-      centerX, centerY, radius * 0.5,
-      centerX, centerY, radius * 1.8
-    )
+    const glowGradient = ctx.createRadialGradient(centerX, centerY, radius * 0.5, centerX, centerY, radius * 1.8)
     glowGradient.addColorStop(0, 'rgba(103, 232, 249, 0.4)')
     glowGradient.addColorStop(0.5, 'rgba(103, 232, 249, 0.2)')
     glowGradient.addColorStop(1, 'rgba(103, 232, 249, 0)')
@@ -68,16 +62,10 @@ export const renderIceTower = (
     ctx.fill()
   }
 
-  // Draw base circle (dark blue)
   drawCircle(ctx, centerX, centerY, radius, '#1e3a8a', '#1e3a8a', 2)
-
-  // Draw inner circle (ice blue)
   drawCircle(ctx, centerX, centerY, radius * 0.7, '#ADD8E6', '#67E8F9', 1)
-
-  // Draw main hexagon crystal
   drawHexagon(ctx, centerX, centerY, HEX_SIZE + level * 2, '#E0F2FE')
 
-  // Draw additional crystals for higher levels
   if (level >= 2) {
     const crystalCount = Math.min(level - 1, 3)
     for (let i = 0; i < crystalCount; i++) {
@@ -89,10 +77,8 @@ export const renderIceTower = (
     }
   }
 
-  // Draw sparkle effects
   drawSparkles(ctx, centerX, centerY, level)
 
-  // Level indicator
   if (level > 1) {
     const levelColor = level === 4 ? '#fbbf24' : '#f8fafc'
     ctx.fillStyle = levelColor
@@ -103,23 +89,14 @@ export const renderIceTower = (
   }
 }
 
-const drawHexagon = (
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  size: number,
-  color: string
-): void => {
+const drawHexagon = (ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, color: string): void => {
   ctx.beginPath()
   for (let i = 0; i < 6; i++) {
     const angle = (i / 6) * Math.PI * 2 - Math.PI / 2
-    const x = cx + Math.cos(angle) * size
-    const y = cy + Math.sin(angle) * size
-    if (i === 0) {
-      ctx.moveTo(x, y)
-    } else {
-      ctx.lineTo(x, y)
-    }
+    const px = cx + Math.cos(angle) * size
+    const py = cy + Math.sin(angle) * size
+    if (i === 0) ctx.moveTo(px, py)
+    else ctx.lineTo(px, py)
   }
   ctx.closePath()
   ctx.fillStyle = color
@@ -128,29 +105,20 @@ const drawHexagon = (
   ctx.lineWidth = 1
   ctx.stroke()
 
-  // Inner highlight
   ctx.beginPath()
   for (let i = 0; i < 6; i++) {
     const angle = (i / 6) * Math.PI * 2 - Math.PI / 2
-    const x = cx + Math.cos(angle) * size * 0.5
-    const y = cy + Math.sin(angle) * size * 0.5
-    if (i === 0) {
-      ctx.moveTo(x, y)
-    } else {
-      ctx.lineTo(x, y)
-    }
+    const px = cx + Math.cos(angle) * size * 0.5
+    const py = cy + Math.sin(angle) * size * 0.5
+    if (i === 0) ctx.moveTo(px, py)
+    else ctx.lineTo(px, py)
   }
   ctx.closePath()
   ctx.fillStyle = '#F0F9FF'
   ctx.fill()
 }
 
-const drawSparkles = (
-  ctx: CanvasRenderingContext2D,
-  centerX: number,
-  centerY: number,
-  level: number
-): void => {
+const drawSparkles = (ctx: CanvasRenderingContext2D, centerX: number, centerY: number, level: number): void => {
   const sparkleCount = 4 + level * 2
   const time = Date.now() / 200
 
@@ -168,15 +136,9 @@ const drawSparkles = (
   }
 }
 
-export const renderIceShard = (
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  angle: number
-): void => {
+export const renderIceShard = (ctx: CanvasRenderingContext2D, x: number, y: number, angle: number): void => {
   const size = 6
 
-  // Draw glow
   const glowGradient = ctx.createRadialGradient(x, y, 0, x, y, size * 2)
   glowGradient.addColorStop(0, 'rgba(103, 232, 249, 0.5)')
   glowGradient.addColorStop(1, 'rgba(103, 232, 249, 0)')
@@ -185,7 +147,6 @@ export const renderIceShard = (
   ctx.fillStyle = glowGradient
   ctx.fill()
 
-  // Draw crystal shard
   ctx.save()
   ctx.translate(x, y)
   ctx.rotate(angle)
@@ -202,7 +163,6 @@ export const renderIceShard = (
   ctx.lineWidth = 1
   ctx.stroke()
 
-  // Inner highlight
   ctx.beginPath()
   ctx.moveTo(size * 0.3, 0)
   ctx.lineTo(0, -size * 0.2)
