@@ -8,13 +8,19 @@ import {
   EnemyInstance,
   ProjectileInstance,
   Position,
-  StatusEffect
+  StatusEffect,
+  EnemyType
 } from '../types'
 import { getMap } from '../game/maps/MapData'
 import { TowerConfig, getTowerUpgradeCost, getTowerDamage, getTowerRange } from '../game/config/TowerConfig'
 import { enemyConfig } from '../game/config/EnemyConfig'
 import { STARTING_GOLD, STARTING_LIVES, SELL_REFUND_RATIO, MAX_SPEED, TILE_SIZE } from '../game/config/GameConstants'
-import { distance, gridToPixel } from '../utils/math'
+import { distance, gridToPixel, pixelToGrid } from '../utils/math'
+import { WaveManager, createWaveManager } from '../game/systems/WaveManager'
+import { moveAlongPath } from '../game/systems/PathSystem'
+import { checkProjectileHits, applyStatusEffect } from '../game/systems/CollisionSystem'
+import { applyDamage, applyStatusEffect as applyDamageStatusEffect, updateStatusEffects, createBurnEffect, createPoisonEffect, createSlowEffect } from '../game/systems/DamageSystem'
+import { calculateKillReward } from '../game/systems/EconomySystem'
 
 export interface GameSettings {
   soundEnabled: boolean
@@ -25,7 +31,7 @@ export interface GameSettings {
 }
 
 const generateId = (): string => {
-  return Math.random().toString(36).substring(2, 11)
+  return `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`
 }
 
 const getInitialState = () => ({
@@ -48,7 +54,8 @@ const getInitialState = () => ({
     showHealthBars: true,
     showDamageNumbers: true,
     defaultSpeed: 1
-  } as GameSettings
+  } as GameSettings,
+  waveManager: null as WaveManager | null
 })
 
 export const useGameStore = create<GameStore>((set, get) => ({
@@ -60,11 +67,15 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }))
   },
 
+
   startGame: (mapId: string): void => {
     const map = getMap(mapId)
     if (!map) return
 
     const settings = get().gameSettings
+    const waveManager = createWaveManager()
+    waveManager.setPath(map.path)
+
 
     set({
       gameState: 'playing',
@@ -79,7 +90,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
       selectedPlacedTower: null,
       towers: [],
       enemies: [],
-      projectiles: []
+      projectiles: [],
+      waveManager
     })
   },
 
@@ -153,8 +165,21 @@ export const useGameStore = create<GameStore>((set, get) => ({
     if (!state.currentMap || state.currentWave >= state.totalWaves) return
     if (state.gameState !== 'playing') return
 
+    const waveIndex = state.currentWave
+    const waveDef = state.currentMap.waves[waveIndex]
+    if (!waveDef) return
+
+    const waveManager = state.waveManager
+    if (waveManager) {
+      waveManager.setOnEnemySpawned((enemy: EnemyInstance) => {
+        set(s => ({ enemies: [...s.enemies, enemy] }))
+      })
+      waveManager.startWave(waveDef)
+    }
+
     set({ currentWave: state.currentWave + 1 })
   },
+
 
   togglePause: (): void => {
     const state = get()
@@ -196,86 +221,45 @@ export const useGameStore = create<GameStore>((set, get) => ({
     const state = get()
     if (state.gameState !== 'playing') return
 
-    const scaledDelta = deltaTime * state.speed
-    const currentTime = performance.now()
 
-    // Update enemies - move along path
-    const updatedEnemies = state.enemies.map(enemy => {
+    const scaledDelta = (deltaTime / 1000) * state.speed
+    const currentTime = performance.now()
+    const path = state.currentMap?.path || []
+
+    // 1. WaveManager spawns enemies
+    const waveManager = state.waveManager
+    if (waveManager && waveManager.isWaveActive) {
+      waveManager.update(scaledDelta, state.enemies)
+    }
+
+    // 2. PathSystem moves enemies along path
+    let updatedEnemies = state.enemies.map(enemy => {
       if (!enemy.isAlive) return enemy
 
-      const path = state.currentMap?.path || []
-      if (path.length === 0) return enemy
-
-      const currentWaypoint = path[enemy.pathIndex]
-      if (!currentWaypoint) return enemy
-
-      const pixelPos = gridToPixel(currentWaypoint.x, currentWaypoint.y)
-      const dx = pixelPos.x - enemy.x
-      const dy = pixelPos.y - enemy.y
-      const dist = Math.sqrt(dx * dx + dy * dy)
-
-      if (dist < 5) {
-        if (enemy.pathIndex >= path.length - 1) {
-          get().removeLife()
-          return { ...enemy, isAlive: false }
-        }
-        return {
-          ...enemy,
-          pathIndex: enemy.pathIndex + 1,
-          x: pixelPos.x,
-          y: pixelPos.y
-        }
+      const reachedExit = moveAlongPath(enemy, scaledDelta, path)
+      if (reachedExit) {
+        get().removeLife()
+        return { ...enemy, isAlive: false }
       }
-
-      const moveSpeed = enemy.speed * TILE_SIZE * (scaledDelta / 1000)
-      const moveX = enemy.x + (dx / dist) * moveSpeed
-      const moveY = enemy.y + (dy / dist) * moveSpeed
-
-      return { ...enemy, x: moveX, y: moveY }
+      return enemy
     }).filter(e => e.isAlive)
 
-    // Update projectiles - move toward targets
-    const updatedProjectiles = state.projectiles.map(proj => {
-      const target = updatedEnemies.find(e => e.id === proj.targetId)
-      if (!target) return { ...proj, targetId: '' }
 
-      const dx = target.x - proj.x
-      const dy = target.y - proj.y
-      const dist = Math.sqrt(dx * dx + dy * dy)
+    // 3. Update status effects on enemies (DamageSystem)
+    updatedEnemies = updatedEnemies.map(enemy => {
+      if (!enemy.isAlive || enemy.effects.length === 0) return enemy
 
-      if (dist < 10) {
-        const damage = proj.damage
-        const updatedEnemiesWithDamage = updatedEnemies.map(e => {
-          if (e.id !== target.id) return e
-          const newHp = e.hp - damage
-          if (newHp <= 0) {
-            const enemyStats = enemyConfig[e.type]
-            get().addGold(enemyStats.reward)
-            get().set(s => ({ score: s.score + enemyStats.reward }))
-            return { ...e, hp: 0, isAlive: false }
-          }
-          return { ...e, hp: newHp }
-        }).filter(e => e.isAlive)
-
-        if (proj.effect) {
-          const updatedWithEffect = updatedEnemiesWithDamage.map(e => {
-            if (e.id !== target.id) return e
-            return { ...e, effects: [...e.effects, proj.effect!] }
-          })
-          return null
-        }
-
-        return null
+      const slowMagnitude = updateStatusEffects(enemy, scaledDelta)
+      if (slowMagnitude > 0) {
+        enemy.speed = enemyConfig[enemy.type].speed * (1 - slowMagnitude)
       }
+      if (enemy.hp <= 0) {
+        return { ...enemy, hp: 0, isAlive: false }
+      }
+      return enemy
+    }).filter(e => e.isAlive)
 
-      const moveSpeed = proj.speed * (scaledDelta / 1000)
-      const moveX = proj.x + (dx / dist) * moveSpeed
-      const moveY = proj.y + (dy / dist) * moveSpeed
-
-      return { ...proj, x: moveX, y: moveY }
-    }).filter((p): p is ProjectileInstance => p !== null)
-
-    // Tower targeting and firing
+    // 4. Tower targeting and firing
     const newProjectiles: ProjectileInstance[] = []
     const updatedTowers = state.towers.map(tower => {
       const towerStats = TowerConfig[tower.type]
@@ -283,12 +267,41 @@ export const useGameStore = create<GameStore>((set, get) => ({
       const damage = getTowerDamage(tower.type, tower.level)
       const rangePixels = range * TILE_SIZE
 
+      // Gold Mine generates passive income
+      if (tower.type === 'goldmine') {
+        const goldPerSecond = 10 * tower.level
+        const goldInterval = 5 // every 5 seconds
+        const timeSinceLastFire = currentTime - tower.lastFireTime
+        if (timeSinceLastFire >= goldInterval * 1000) {
+          get().addGold(Math.floor(goldPerSecond * goldInterval))
+          return { ...tower, lastFireTime: currentTime }
+        }
+        return tower
+      }
+
+      // Slow Tower is an aura - no projectiles
+      if (tower.type === 'slow') {
+        // Apply slow to all enemies in range
+        updatedEnemies = updatedEnemies.map(enemy => {
+          const towerPos = gridToPixel(tower.gridX, tower.gridY)
+          const dist = distance(towerPos, { x: enemy.x, y: enemy.y })
+          if (dist <= rangePixels) {
+            const slowEffect = createSlowEffect(tower.id)
+            return applyDamageStatusEffect(enemy, slowEffect)
+          }
+          return enemy
+        })
+        return tower
+      }
+
+      // Find closest enemy in range
       let target: EnemyInstance | null = null
       let minDist = Infinity
 
       for (const enemy of updatedEnemies) {
         const towerPos = gridToPixel(tower.gridX, tower.gridY)
         const dist = distance(towerPos, { x: enemy.x, y: enemy.y })
+
 
         if (dist <= rangePixels) {
           const enemyStats = enemyConfig[enemy.type]
@@ -310,6 +323,34 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
       if (timeSinceLastFire >= fireInterval) {
         const towerPos = gridToPixel(tower.gridX, tower.gridY)
+
+
+        // Create projectile based on tower type
+        let effect: StatusEffect | null = null
+        let isAoE = false
+        let aoERadius = 0
+
+
+        switch (tower.type) {
+          case 'fire':
+            effect = createBurnEffect(tower.id)
+            break
+          case 'poison':
+            effect = createPoisonEffect(tower.id)
+            isAoE = true
+            aoERadius = 30
+            break
+          case 'ice':
+            effect = createSlowEffect(tower.id)
+            break
+          case 'cannon':
+          case 'bomb':
+            isAoE = true
+            aoERadius = 50
+            break
+        }
+
+
         const projectile: ProjectileInstance = {
           id: generateId(),
           type: tower.type,
@@ -318,11 +359,12 @@ export const useGameStore = create<GameStore>((set, get) => ({
           targetId: target.id,
           damage,
           speed: towerStats.projectileSpeed,
-          effect: null,
-          isAoE: false,
-          aoERadius: 0
+          effect,
+          isAoE,
+          aoERadius
         }
         newProjectiles.push(projectile)
+
 
         return {
           ...tower,
@@ -331,21 +373,124 @@ export const useGameStore = create<GameStore>((set, get) => ({
         }
       }
 
+
       return { ...tower, currentTarget: target.id }
     })
 
+
+    // 5. Projectiles move toward targets
+    let updatedProjectiles = [...state.projectiles, ...newProjectiles].map(proj => {
+      if (!proj.targetId) return null
+
+      const target = updatedEnemies.find(e => e.id === proj.targetId)
+      if (!target) return null
+
+      const dx = target.x - proj.x
+      const dy = target.y - proj.y
+      const dist = Math.sqrt(dx * dx + dy * dy)
+
+      if (dist < 15) {
+        // Hit! Return hit info for processing
+        return { projectile: proj, target }
+      }
+
+      if (proj.speed === 0) return null // Laser/continuous damage
+
+      const moveSpeed = proj.speed * scaledDelta * 60
+      const moveX = proj.x + (dx / dist) * moveSpeed
+      const moveY = proj.y + (dy / dist) * moveSpeed
+
+      return { ...proj, x: moveX, y: moveY }
+    })
+
+
+    // 6. CollisionSystem checks hits and applies damage
+    const processedHits = new Set<string>()
+    updatedProjectiles = updatedProjectiles.filter(p => {
+      if (!p || !('targetId' in p)) return false
+      const proj = p as ProjectileInstance
+      if (processedHits.has(proj.id)) return false
+
+      const target = updatedEnemies.find(e => e.id === proj.targetId)
+      if (!target) return false
+
+      const dx = target.x - proj.x
+      const dy = target.y - proj.y
+      const dist = Math.sqrt(dx * dx + dy * dy)
+
+      if (dist < 15) {
+        processedHits.add(proj.id)
+
+
+        // Apply damage
+        const enemyStats = enemyConfig[target.type]
+        const actualDamage = Math.max(1, proj.damage - enemyStats.armor)
+        target.hp -= actualDamage
+
+        // Apply status effect
+        if (proj.effect) {
+          target = applyDamageStatusEffect(target, proj.effect)
+        }
+
+        // Handle AoE
+        if (proj.isAoE && proj.aoERadius > 0) {
+          updatedEnemies = updatedEnemies.map(e => {
+            if (e.id === target.id) return target
+            const aoeDist = distance(
+              { x: target.x, y: target.y },
+              { x: e.x, y: e.y }
+            )
+            if (aoeDist <= proj.aoERadius) {
+              const aoeDamage = Math.max(1, Math.floor(proj.damage * 0.5) - enemyStats.armor)
+              e.hp -= aoeDamage
+            }
+            return e
+          })
+        }
+
+        return null // Remove projectile
+      }
+
+      return proj
+    })
+
+
+    // 7. Remove dead enemies, add gold
+    const deadEnemies: EnemyInstance[] = []
+    updatedEnemies = updatedEnemies.filter(enemy => {
+      if (enemy.hp <= 0) {
+        deadEnemies.push(enemy)
+        return false
+      }
+      return true
+    })
+
+
+    for (const dead of deadEnemies) {
+      const enemyStats = enemyConfig[dead.type]
+      const reward = calculateKillReward(enemyStats.reward, state.currentWave, enemyStats.isBoss)
+      get().addGold(reward)
+      set(s => ({ score: s.score + reward }))
+    }
+
+
+    // 8. Check win condition
     let newGameState = state.gameState
     if (
       state.currentWave >= state.totalWaves &&
       updatedEnemies.length === 0 &&
-      state.currentWave > 0
+      state.currentWave > 0 &&
+      state.enemies.length === 0
     ) {
-      newGameState = 'victory'
+      const waveManager = state.waveManager
+      if (waveManager && waveManager.isSpawningComplete()) {
+        newGameState = 'victory'
+      }
     }
 
     set({
       enemies: updatedEnemies,
-      projectiles: [...updatedProjectiles, ...newProjectiles],
+      projectiles: updatedProjectiles.filter((p): p is ProjectileInstance => p !== null && 'targetId' in p),
       towers: updatedTowers,
       gameState: newGameState
     })
